@@ -12,16 +12,69 @@ from features import merge_entries, prepare_entry
 from utills import chunker, cartesian_product
 import seaborn as sns
 import matplotlib.pyplot as plt
+import pandas as pd
+import shap
+shap.initjs()
 
 class AVAnalysis:
-    def __init__(self, model_path):
+    def __init__(self, model_path, vector_path_prefix=None):
         with open(model_path, 'rb') as f:
-            (clf_pan, transformer_pan, scaler_pan, secondary_scaler_pan) = pickle.load(f)
+            model = pickle.load(f)
+            if len(model) == 4:
+                (clf_pan, transformer_pan, scaler_pan, secondary_scaler_pan) = model
+            else:
+                (
+                    aucs,
+                    clf_pan,
+                    roc_auc,
+                    transformer_pan, 
+                    scaler_pan,
+                    secondary_scaler_pan,
+                    feature_sz,
+                    train_sz,
+                    train_idxs,
+                    test_sz,
+                    test_idxs
+                ) = model
+                assert vector_path_prefix is not None
+                self.fnames = np.array(transformer_pan.get_feature_names())
+                self.XX_train = np.memmap(vector_path_prefix + 'vectorized_XX_train.npy', dtype='float32', mode='r', shape=(train_sz, feature_sz))
+                self.XX_test = np.memmap(vector_path_prefix + 'vectorized_XX_test.npy', dtype='float32', mode='r', shape=(test_sz, feature_sz))
+                self.feature_sz = feature_sz
+                self.train_sz = train_sz
+                self.test_sz = test_sz
+                self.explainer = shap.LinearExplainer(clf_pan, self.XX_train)
+                self.shap_values = self.explainer.shap_values(self.XX_test)
+                
             self.clf_pan = clf_pan
             self.transformer_pan = transformer_pan
             self.scaler_pan = scaler_pan
             self.secondary_scaler_pan = secondary_scaler_pan
+            
+            
     
+    def __create_shap_explainer(self, pan_experiment_path):
+        with open(f'{pan_experiment_path}experiment_data.p', 'rb') as f:
+            (
+                aucs,
+                clf,
+                roc_auc,
+                transformer, 
+                scaler,
+                secondary_scaler,
+                feature_sz,
+                train_sz,
+                train_idxs,
+                test_sz,
+                test_idxs
+            ) = pickle.load(f)
+
+        self.fnames = np.array(transformer.get_feature_names())
+        self.XX_train = np.memmap(pan_experiment_path + 'vectorized_XX_train.npy', dtype='float32', mode='r', shape=(train_sz, feature_sz))
+        self.XX_test = np.memmap(pan_experiment_path + 'vectorized_XX_test.npy', dtype='float32', mode='r', shape=(test_sz, feature_sz))
+        self.explainer = shap.LinearExplainer(clf, XX_train)
+
+
     def predict_pan(self, docs_1, docs_2):
         docs_merged_1 = [merge_entries(c) for c in docs_1]
         docs_merged_2 = [merge_entries(c) for c in docs_2]
@@ -34,7 +87,7 @@ class AVAnalysis:
     
     
     def apply_model(self, docs):
-        (human_docs_1, human_docs_2, ai_docs_1, ai_docs_2) = docs
+        (human_docs_1, human_docs_2, ai_docs_1, ai_docs_2, _) = docs
         
         probs_hh = self.predict_pan(human_docs_1, human_docs_2)
         print(f"Human - Human:          {np.mean(probs_hh):.3f}")
@@ -93,6 +146,120 @@ class AVAnalysis:
         ax.set_yticklabels(key_roots)
         ax.xaxis.tick_top()
         return ax
+    
+    
+    def plot_shap_summary_av_model(self, n=1000):
+        XX_test_sampled = self.XX_test[np.random.choice(self.test_sz, 5000), :]
+        shap_values = self.explainer.shap_values(XX_test_sampled)
+        shap.summary_plot(shap_values, XX_test_sampled, feature_names=self.fnames, max_display=25)
+        plt.tight_layout()
+        
+    def get_shap_values(self, docs_1, docs_2):
+        X_1 = self.scaler_pan.transform(
+            self.transformer_pan.transform(
+                [merge_entries(d) for d in docs_1]
+            ).todense()
+        )
+        X_2 = self.scaler_pan.transform(
+            self.transformer_pan.transform(
+                [merge_entries(d) for d in docs_2]
+            ).todense()
+        )
+
+        X_diff = self.secondary_scaler_pan.transform(np.abs(X_1 - X_2))
+        shap_values = self.explainer.shap_values(X_diff)
+        return shap_values
+    
+    
+    def plot_shap_summary(self, docs_1, docs_2):
+        plt.clf()
+        X_1 = self.scaler_pan.transform(
+            self.transformer_pan.transform(
+                [merge_entries(d) for d in docs_1]
+            ).todense()
+        )
+        X_2 = self.scaler_pan.transform(
+            self.transformer_pan.transform(
+                [merge_entries(d) for d in docs_2]
+            ).todense()
+        )
+
+        X_diff = self.secondary_scaler_pan.transform(np.abs(X_1 - X_2))
+        shap_values = self.explainer.shap_values(X_diff)
+        shap.summary_plot(shap_values, X_diff, feature_names=self.fnames, max_display=25)
+        plt.tight_layout()
+        plt.show()
+        
+    
+    def get_all_shap_values(self, docs):
+        (human_docs_1, human_docs_2, ai_docs_1, ai_docs_2, pair_ids) = docs
+        shap_hh = self.get_shap_values(human_docs_1, human_docs_2)
+        shap_ha_1 = self.get_shap_values(human_docs_1, ai_docs_1)
+        shap_ha_2 = self.get_shap_values(human_docs_2, ai_docs_2)
+        shap_ha = np.concatenate([shap_ha_1, shap_ha_2])
+        shap_aa = self.get_shap_values(ai_docs_1, ai_docs_2)
+        return (shap_hh, shap_ha, shap_aa)
+    
+    
+    def get_all_shap_summary(self, docs, model_name):
+        (shap_hh, shap_ha, shap_aa) = self.get_all_shap_values(docs)
+        shap_summaries_df = pd.DataFrame(
+            data=np.vstack([
+                np.abs(shap_hh.mean(axis=0)), 
+                np.abs(shap_ha.mean(axis=0)),
+                np.abs(shap_aa.mean(axis=0)),
+            ]).T,
+            columns=['human-human', f'{model_name}-{model_name}', f'human-{model_name}']
+        )
+        shap_summaries_df['fnames'] = self.fnames
+        shap_summaries_df = shap_summaries_df.set_index('fnames')
+        return shap_summaries_df
+    
+    def plot_shap_summary_single_comparison(self, shap_values: pd.Series, limit=15):
+        fig, ax = plt.subplots( figsize=(5, 12))
+        shap_values = shap_values.sort_values(ascending=False).head(limit).sort_values()
+        x = np.arange(len(shap_values))
+        x_labels = shap_values.index
+        ax.barh(x, shap_values)
+        ax.set_yticks(x)
+        ax.set_yticklabels(labels=x_labels, rotation=0)
+        ax.set_xlabel('SHAP Value')
+        plt.tight_layout()
+        
+        return
+    
+    
+    def plot_shap_summary_two_comparisons(self, shap_summaries_df, col1, col2, limit=15):
+        buffer = 3
+        shap_summaries_df['importance_diff'] = shap_summaries_df[col2] - shap_summaries_df[col1]
+
+        shap_summaries_selected_df = pd.concat([
+            shap_summaries_df.sort_values('importance_diff', ascending=False).head(limit),
+            # NaNs as buffer
+            pd.DataFrame({c: [np.nan]*buffer for c in shap_summaries_df.columns}, index=[f'buffer_{i}' for i in range(buffer)]),
+            shap_summaries_df.sort_values('importance_diff', ascending=False).tail(limit)
+        ])
+
+        x = np.arange(len(shap_summaries_selected_df))
+        x_labels = [
+            f if 'buffer' not in f else ' ' for f in shap_summaries_selected_df.index
+        ]
+
+        fig, ax = plt.subplots( figsize=(5,12))
+        width = 0.4
+        offset = -width/2
+        ax.barh(x + offset, shap_summaries_selected_df[col1], height=width, label=col1)
+        offset = width/2
+        ax.barh(x + offset, shap_summaries_selected_df[col2], height=width, label=col2)
+        plt.axhline(y=limit - width, color='gray')
+        plt.axhline(y=limit + buffer - width - offset, color='gray')
+        ax.set_yticks(x)
+        ax.set_yticklabels(labels=x_labels, rotation=0)
+        ax.set_xlabel('SHAP Value')
+        ax.legend()
+        plt.tight_layout()
+    
+    
     
 def unfix_quotes(doc):
     """
