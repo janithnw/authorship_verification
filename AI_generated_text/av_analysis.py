@@ -112,7 +112,7 @@ class AVAnalysis:
     def apply_model_multiple_sets(self, all_docs_dict, key_roots):
         # Fond docs that are from the pan dataset records
         common_ids = list(set.intersection(*[set(ids) for _, ids in all_docs_dict.values()]))
-        
+        print("Number of common docs:", len(common_ids))
         # Create a unified dictionary where each key is from {'human_1', 'human_2', 'chatgpt_1', ....}
         # and each value is an ordered list of documents (ordered by the common_ids list)
         res = {}
@@ -140,16 +140,19 @@ class AVAnalysis:
     
     def plot_multiple_set_result(self, res, key_roots):
         res = res.T
-        fig, ax = plt.subplots(1, 1, figsize=(5, 5))
+        #plt.clf()
+        fig, ax = plt.subplots(1, 1, figsize=(7, 7))
         sns.heatmap(np.where(res == 0, np.nan, res), ax=ax, annot=res, cmap='Blues')
+        ax.tick_params(axis='both', which='major', labelsize=12)
         ax.set_xticklabels(key_roots)
         ax.set_yticklabels(key_roots)
         ax.xaxis.tick_top()
+        plt.tight_layout()
         return ax
     
     
     def plot_shap_summary_av_model(self, n=1000):
-        XX_test_sampled = self.XX_test[np.random.choice(self.test_sz, 5000), :]
+        XX_test_sampled = self.XX_test[np.random.choice(self.test_sz, n), :]
         shap_values = self.explainer.shap_values(XX_test_sampled)
         shap.summary_plot(shap_values, XX_test_sampled, feature_names=self.fnames, max_display=25)
         plt.tight_layout()
@@ -216,7 +219,7 @@ class AVAnalysis:
         return shap_summaries_df
     
     def plot_shap_summary_single_comparison(self, shap_values: pd.Series, limit=15):
-        fig, ax = plt.subplots( figsize=(5, 12))
+        fig, ax = plt.subplots( figsize=(5, 8))
         shap_values = shap_values.sort_values(ascending=False).head(limit).sort_values()
         x = np.arange(len(shap_values))
         x_labels = shap_values.index
@@ -269,7 +272,7 @@ def unfix_quotes(doc):
     text = text.replace('\'', '"')
     return [prepare_entry(text, mode='accurate', tokenizer='casual')]
 
-def load_generated_docs(path):
+def load_generated_docs(path, limit_ai_size=None):
     human_docs_1 = []
     human_docs_2 = []
     ai_docs_1 = []
@@ -282,9 +285,13 @@ def load_generated_docs(path):
                 d = json.loads(l)
                 human_docs_1.append(unfix_quotes(d['pair'][0]['human']))
                 human_docs_2.append(unfix_quotes(d['pair'][1]['human']))
-
-                ai_docs_1.append(unfix_quotes(d['pair'][0]['ai'][:20]))
-                ai_docs_2.append(unfix_quotes(d['pair'][1]['ai'][:20]))
+                #print(len(d['pair'][0]['ai']))
+                if limit_ai_size:
+                    ai_docs_1.append(unfix_quotes(d['pair'][0]['ai'][:limit_ai_size]))
+                    ai_docs_2.append(unfix_quotes(d['pair'][1]['ai'][:limit_ai_size]))
+                else:
+                    ai_docs_1.append(unfix_quotes(d['pair'][0]['ai']))
+                    ai_docs_2.append(unfix_quotes(d['pair'][1]['ai']))
                 pair_ids.append(d['id'])
                 
     print('Read:', len(human_docs_1))
